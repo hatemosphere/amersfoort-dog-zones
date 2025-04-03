@@ -49,6 +49,27 @@ These instructions will get you a copy of the project up and running on your loc
     *   Press `i` to open in an iOS simulator
     *   Press `w` to open in your web browser
 
+## Configuration
+
+This application requires a Google Maps API key to display the map tiles and potentially use other Google Maps services.
+
+### Local Development
+
+1.  **Obtain an API Key:** Get a Google Maps API key from the [Google Cloud Console](https://console.cloud.google.com/google/maps-apis/overview). Ensure the "Maps JavaScript API" (for web) and "Maps SDK for Android" / "Maps SDK for iOS" (for native) are enabled for your key.
+2.  **Create `.env` file:** Create a file named `.env` in the root directory of the project.
+3.  **Add the key:** Add the following line to your `.env` file, replacing `YOUR_GOOGLE_MAPS_API_KEY` with your actual key:
+    ```
+    EXPO_PUBLIC_GOOGLE_MAPS_API_KEY=YOUR_GOOGLE_MAPS_API_KEY
+    ```
+    The `.env` file is included in `.gitignore` and should **not** be committed to version control.
+4.  **Restart:** Restart your Expo development server (`npx expo start --clear`) after creating or modifying the `.env` file.
+
+### Deployment (e.g., Vercel)
+
+When deploying the application (especially the web version), you need to set the `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` as an environment variable within your deployment platform's settings.
+
+*   **Vercel:** Go to your Project Settings > Environment Variables and add `EXPO_PUBLIC_GOOGLE_MAPS_API_KEY` with your key as the value.
+
 ## Data Source
 
 The application utilizes data for dog zones in Amersfoort obtained from the Dutch National Georegister (CKAN Dataplatform).

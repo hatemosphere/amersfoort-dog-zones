@@ -6,6 +6,12 @@ import { GeoJsonData, GeoJsonFeature, Geometry, ZoneStyles, ZoneStyle, Processed
 import MapDisplay from '@/components/MapDisplay';
 import localDogZonesData from '@/assets/data/amersfoort-hondenkaart.json';
 
+// --- Constants ---
+const MAX_NEAREST = 5;
+
+// Read API key from environment variables (outside the component)
+const GOOGLE_MAPS_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY;
+
 // --- Helper Functions ---
 /**
  * Calculates the distance between two lat/lng coordinates in kilometers using Haversine formula.
@@ -22,7 +28,7 @@ function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): nu
 }
 
 /**
- * Gets a representative coordinate {lat, lng} for distance calculation.
+ * Gets a representative coordinate {lat, lng} for distance calculation. 
  */
 function getCentroid(geometry: Geometry): { lat: number; lng: number } | null {
     if (!geometry || !geometry.coordinates) return null;
@@ -34,11 +40,12 @@ function getCentroid(geometry: Geometry): { lat: number; lng: number } | null {
         } else if (geomType === "MultiPolygon" && coords && coords[0] && coords[0][0] && coords[0][0][0]) {
             return { lat: coords[0][0][0][1], lng: coords[0][0][0][0] };
         }
-    } catch { return null; }
+    } catch (error) {
+        console.error("Error calculating centroid:", error);
+        return null; 
+    }
     return null;
 }
-
-const WEB_GOOGLE_MAPS_API_KEY = "AIzaSyAP3IqJBg3KxoTub0_cDXd0-iwIpUwQz0k";
 
 // Styles - keep both Green/Orange, names can be generic
 const zoneStyles: ZoneStyles = {
@@ -64,8 +71,6 @@ const zoneStyles: ZoneStyles = {
   ROOD: { fillColor: '', strokeColor: '', strokeWidth: 0, name: '' }, 
   WIT: { fillColor: '', strokeColor: '', strokeWidth: 0, name: '' },
 };
-
-const MAX_NEAREST = 5;
 
 export default function HomeScreen() {
   // State uses ProcessedZone
@@ -133,15 +138,15 @@ export default function HomeScreen() {
     const initializeApp = async () => {
       try {
         setLoading(true);
-        setError(null); // Clear previous errors
+        setError(null); 
         setLocationStatus('Requesting...');
 
-        // 1. Process local data for Green and Orange - AREA or POINT
+        // Process local data for Green and Orange - AREA or POINT
         const validProcessedZones: ProcessedZone[] = [];
         if (localDogZonesData?.features) {
            const features = (localDogZonesData as GeoJsonData).features;
 
-           for (const feature of features) {
+           for (const feature of features) { 
                const properties = feature.properties;
                const code = properties?.CODE;
 
@@ -160,11 +165,16 @@ export default function HomeScreen() {
                        } catch { /* ignore parse error */ }
                    }
                    
-                   // Determine zoneType and finalize data
+                   // Create base data matching ProcessedZone structure (which extends GeoJsonFeature)
                    const processedZoneData: Partial<ProcessedZone> = {
-                       ...feature,
-                       centroid,
-                       properties
+                       // Inherited fields from GeoJsonFeature:
+                       type: 'Feature', 
+                       id: feature.id, // Use original feature ID
+                       geometry: feature.geometry,
+                       geometry_name: feature.geometry_name, // Use original geometry_name
+                       properties: properties,
+                       // ProcessedZone specific fields:
+                       centroid: centroid,
                    };
 
                    if (area !== undefined) { // If area is valid
@@ -180,10 +190,10 @@ export default function HomeScreen() {
            }
         }
         if (isMounted) setProcessedZones(validProcessedZones);
-        console.log(`[Init] Processed ${validProcessedZones.length} valid green/orange zones (area or point).`);
+        console.log(`[Init] Processed ${validProcessedZones.length} valid green/orange zones.`);
 
-        // 2. Initial Location Fetch
-        await refreshUserLocation(true); // Call the extracted function on initial load
+        // Initial Location Fetch
+        await refreshUserLocation(true); 
 
       } catch (e) {
         console.error("Failed to initialize app:", e);
@@ -207,11 +217,10 @@ export default function HomeScreen() {
     };
   }, []); // Run once on mount
 
-  // Effect to calculate nearest zones (uses processedZones)
+  // Effect to calculate nearest zones
   useEffect(() => {
       if (userLocation && processedZones.length > 0) {
            console.log("[Nearest] Calculating distances...");
-           // Centroid is guaranteed by initial processing
            const zonesWithDistance = processedZones.map(zone => ({
                ...zone,
                distance: getDistance(
@@ -221,12 +230,12 @@ export default function HomeScreen() {
                    zone.centroid.lng
                )
            }));
-           zonesWithDistance.sort((a, b) => a.distance - b.distance); // distance is guaranteed
+           zonesWithDistance.sort((a, b) => a.distance! - b.distance!); // Added non-null assertion
            setNearestZones(zonesWithDistance.slice(0, MAX_NEAREST));
       }
-  }, [userLocation, processedZones]); // Depend on processedZones
+  }, [userLocation, processedZones]); 
 
-  // Effect to update selected zone distance when user location changes
+  // Effect to update selected zone distance
   useEffect(() => {
       if (selectedZone && userLocation) {
           console.log("[Selected] Updating distance for selected zone...");
@@ -236,9 +245,8 @@ export default function HomeScreen() {
               selectedZone.centroid.lat,
               selectedZone.centroid.lng
           );
-          selectedZone.distance = distance;
-          // Force a re-render by creating a new object
-          setSelectedZone({ ...selectedZone });
+          // Ensure selectedZone is updated correctly
+          setSelectedZone(prevZone => prevZone ? ({ ...prevZone, distance: distance }) : null);
       }
   }, [userLocation, selectedZone]);
 
@@ -260,14 +268,14 @@ export default function HomeScreen() {
   }
 
   // --- Component Logic & Render (AFTER hooks and early returns) ---
-  // getFeatureStyle based on CODE
-  const getFeatureStyle = (feature: GeoJsonFeature): ZoneStyle => { // Use GeoJsonFeature as input type
+  const getFeatureStyle = (feature: ProcessedZone): ZoneStyle => {
      const code = feature.properties?.CODE;
      if (code === 'GROEN') return zoneStyles.GROEN;
      if (code === 'ORANJE') return zoneStyles.ORANJE;
      return zoneStyles.DEFAULT; // Fallback
   };
 
+  // formatCoordinates
   const formatCoordinates = (geometry: Geometry): { latitude: number; longitude: number }[] => {
     if (!geometry || !geometry.coordinates) return [];
 
@@ -377,11 +385,11 @@ export default function HomeScreen() {
         showsUserLocation={locationStatus === 'Granted'}
         getFeatureStyle={getFeatureStyle}
         formatCoordinates={formatCoordinates}
-        apiKey={WEB_GOOGLE_MAPS_API_KEY}
+        apiKey={GOOGLE_MAPS_API_KEY}
         initialCenter={initialWebCenter}
         initialZoom={initialWebZoom}
         processedZones={processedZones}
-        zoneStyles={{ GROEN: zoneStyles.GROEN, ORANJE: zoneStyles.ORANJE, DEFAULT: zoneStyles.DEFAULT } as ZoneStyles}
+        zoneStyles={zoneStyles as ZoneStyles} 
         userLocation={userLocation ? { lat: userLocation.coords.latitude, lng: userLocation.coords.longitude } : undefined}
         onZoneSelect={(zone: ProcessedZone) => handleZoneSelection(zone, false)}
         selectedZoneId={selectedZone?.id}
@@ -398,44 +406,37 @@ export default function HomeScreen() {
          {/* <Text style={{fontSize: 10, textAlign: 'center'}}>Status: {locationStatus}</Text> */} 
       </View>
 
-      {/* Updated Legend */} 
+      {/* Updated Legend - Might need Point legend items re-added if removed */} 
        <View style={styles.legendContainer}>
           <View style={styles.legendItem}>
-             {/* Green Area */} 
              <View style={[styles.legendColorBox, { backgroundColor: zoneStyles.GROEN.fillColor }]} />
              <Text style={styles.legendText}>{zoneStyles.GROEN.name} (Area)</Text>
           </View>
           <View style={styles.legendItem}>
-              {/* Orange Area */} 
              <View style={[styles.legendColorBox, { backgroundColor: zoneStyles.ORANJE.fillColor }]} /> 
              <Text style={styles.legendText}>{zoneStyles.ORANJE.name} (Area)</Text>
           </View>
            <View style={styles.legendItem}>
-             {/* Green Point (use stroke color for dot) */} 
              <View style={[styles.legendColorBox, { backgroundColor: zoneStyles.GROEN.strokeColor, borderRadius: 10 }]} /> 
              <Text style={styles.legendText}>{zoneStyles.GROEN.name} (Point)</Text>
           </View>
           <View style={styles.legendItem}>
-             {/* Orange Point (use stroke color for dot) */} 
              <View style={[styles.legendColorBox, { backgroundColor: zoneStyles.ORANJE.strokeColor, borderRadius: 10 }]} /> 
              <Text style={styles.legendText}>{zoneStyles.ORANJE.name} (Point)</Text>
           </View>
        </View>
 
-      {/* Nearest Zones Overlay - Update Text Rendering */}
+      {/* Nearest Zones Overlay - Update Text Rendering (Check non-null assertions) */}
       {nearestZones.length > 0 && (
           <View style={styles.nearestContainer}>
               <Text style={styles.nearestTitle}>Nearest Off-Leash Zones:</Text>
               {nearestZones.map(zone => (
                   <TouchableOpacity key={zone.id} onPress={() => handleZoneSelection(zone, true)}> 
                      <Text style={[styles.nearestItem, selectedZone?.id === zone.id && styles.selectedItem]}>
-                         {/* Show Distance */} 
-                         {`(~${(zone.distance! * 1000).toFixed(0)}m)`}
-                         {/* ONLY show Area if zoneType is 'area' */} 
-                         {zone.zoneType === 'area' && 
-                            ` - Area: ${zone.area!.toFixed(0)} m²`
+                         {zone.distance != null ? `(~${(zone.distance * 1000).toFixed(0)}m)` : '(Dist. N/A)'}
+                         {zone.zoneType === 'area' && zone.area != null &&
+                            ` - Area: ${zone.area.toFixed(0)} m²`
                          }
-                         {/* Keep showing color code for clarity */} 
                          {` (${zone.properties.CODE})`}
                      </Text>
                   </TouchableOpacity>
@@ -443,14 +444,13 @@ export default function HomeScreen() {
           </View>
       )}
       
-      {/* Navigation Prompt - Update Text Rendering */}
+      {/* Navigation Prompt - Update Text Rendering (Check non-null assertions) */}
       {selectedZone && (
           <View style={styles.navigationPrompt}>
               <Text style={styles.promptText}>
-                  {/* Show distance and area information */}
                   Navigate to selected zone?
-                  {selectedZone.distance && ` (${(selectedZone.distance * 1000).toFixed(0)}m away)`}
-                  {selectedZone.area && ` (Area: ${selectedZone.area.toFixed(0)} m²)`}
+                  {selectedZone.distance != null ? ` (${(selectedZone.distance * 1000).toFixed(0)}m away)` : ''}
+                  {selectedZone.area != null ? ` (Area: ${selectedZone.area.toFixed(0)} m²)` : ''}
               </Text>
              <View style={styles.promptButtons}>
                  <Button title="Go" onPress={() => handleNavigationRequest(selectedZone)} />
