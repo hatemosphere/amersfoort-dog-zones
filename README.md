@@ -85,7 +85,16 @@ The application utilizes data for dog zones in Amersfoort obtained from the Dutc
 *   **Resource ID:** `e467231b-e0c8-4c59-8ad2-c8681004f191`
 *   **Package ID:** `85e28410-c1b0-41c2-bba4-15767093c477`
 
-The GeoJSON data is included locally in the project under `assets/data/amersfoort-hondenkaart.json`.
+The GeoJSON data is filtered to include only the relevant "GROEN" (green) and "ORANJE" (orange) zones, reducing the file size from approximately 1MB to 330KB. This optimization helps improve application startup time.
+
+To regenerate the filtered data file, you can run:
+```bash
+node filter-data.js
+```
+
+Both the original data and the filtered data are included in the project:
+- Original data (all zones): `assets/data/amersfoort-hondenkaart-original.json`
+- Filtered data (only green and orange zones): `assets/data/amersfoort-hondenkaart-filtered.json`
 
 ## Technologies Used
 

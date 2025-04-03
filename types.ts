@@ -18,10 +18,8 @@ export interface GeoJsonFeature {
   type: 'Feature';
   id: string;
   geometry: Geometry;
-  // Restore geometry_name as potentially required if MapDisplay needs it, 
-  // or adjust MapDisplay if it doesn't.
-  // For now, reverting to original definition found earlier.
-  geometry_name: string; 
+  // Make geometry_name optional again
+  geometry_name?: string; 
   properties: FeatureProperties;
 }
 
@@ -50,8 +48,9 @@ export interface ZoneStyles {
   [key: string]: ZoneStyle; // Allow index signature for dynamic access
 }
 
-// Modified ProcessedZone interface from before merging
-export interface ProcessedZone extends GeoJsonFeature {
+// Modified ProcessedZone interface
+export interface ProcessedZone extends Omit<GeoJsonFeature, 'geometry_name'> { // Omit potentially problematic field
+    geometry_name?: string; // Re-add as optional
     zoneType: 'area' | 'point'; // Distinguish based on valid area
     centroid: { lat: number; lng: number }; // Centroid required
     area?: number; // Area optional (present for 'area' type)

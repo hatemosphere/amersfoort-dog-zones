@@ -2,12 +2,19 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { StyleSheet, View, ActivityIndicator, Text, Alert, Linking, TouchableOpacity, Button, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
-import { GeoJsonData, GeoJsonFeature, Geometry, ZoneStyles, ZoneStyle, ProcessedZone } from '@/types';
+// Import turf functions
+import * as turf from '@turf/turf'; 
+// Use original type imports, rely on casting/wrapping for turf
+import { GeoJsonData, Geometry, ZoneStyles, ZoneStyle, ProcessedZone, FeatureProperties } from '@/types'; // Ensure FeatureProperties is imported if needed
 import MapDisplay from '@/components/MapDisplay';
-import localDogZonesData from '@/assets/data/amersfoort-hondenkaart.json';
+// Use the filtered data file (smaller, only GROEN and ORANJE features)
+import localDogZonesData from '@/assets/data/amersfoort-hondenkaart-filtered.json';
 
 // --- Constants ---
+const MERGE_DISTANCE_METERS = 100; // Max distance for merging areas
 const MAX_NEAREST = 5;
+const DEFAULT_ZONE_ID_PREFIX = "zone_"; // Prefix for original zone IDs
+const MERGED_ZONE_ID_PREFIX = "merged_"; // Prefix for merged zone IDs
 
 // Read API key from environment variables (outside the component)
 const GOOGLE_MAPS_API_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY;
@@ -28,7 +35,7 @@ function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): nu
 }
 
 /**
- * Gets a representative coordinate {lat, lng} for distance calculation. 
+ * Gets a representative coordinate {lat, lng} for distance calculation.
  */
 function getCentroid(geometry: Geometry): { lat: number; lng: number } | null {
     if (!geometry || !geometry.coordinates) return null;
@@ -138,84 +145,186 @@ export default function HomeScreen() {
     const initializeApp = async () => {
       try {
         setLoading(true);
-        setError(null); 
+        setError(null);
         setLocationStatus('Requesting...');
 
-        // Process local data for Green and Orange - AREA or POINT
-        const validProcessedZones: ProcessedZone[] = [];
+        // 1. Initial Processing into Raw Zones (Areas & Points)
+        const initialAreaZones: ProcessedZone[] = [];
+        const initialPointZones: ProcessedZone[] = [];
+        
         if (localDogZonesData?.features) {
-           const features = (localDogZonesData as GeoJsonData).features;
+          const features = (localDogZonesData as GeoJsonData).features;
 
-           for (const feature of features) { 
-               const properties = feature.properties;
-               const code = properties?.CODE;
+          for (let i = 0; i < features.length; i++) {
+            const feature = features[i];
+            const properties = feature.properties;
+            const code = properties?.CODE;
 
-               // Process if Green OR Orange
-               if ((code === "GROEN" || code === "ORANJE") && feature.geometry) { 
-                   const centroid = getCentroid(feature.geometry);
-                   if (!centroid) continue; // ALWAYS skip if no centroid
+            if ((code === "GROEN" || code === "ORANJE") && feature.geometry) {
+              const tempId = `${DEFAULT_ZONE_ID_PREFIX}${i}`;
+              let area: number | undefined = undefined;
+              
+              if (properties.OPPERVLAKTE) {
+                try {
+                  const parsedArea = parseFloat(properties.OPPERVLAKTE);
+                  if (!isNaN(parsedArea) && parsedArea > 0) {
+                    area = parsedArea;
+                  }
+                } catch { /* ignore parse error */ }
+              }
+              
+              const centroid = getCentroid(feature.geometry);
+              if (!centroid) continue; // Skip if no valid centroid
 
-                   let area: number | undefined = undefined;
-                   if (properties.OPPERVLAKTE) {
-                       try { 
-                           const parsedArea = parseFloat(properties.OPPERVLAKTE);
-                           if (!isNaN(parsedArea) && parsedArea > 0) {
-                               area = parsedArea; // Only set if valid positive number
-                           }
-                       } catch { /* ignore parse error */ }
-                   }
-                   
-                   // Create base data matching ProcessedZone structure (which extends GeoJsonFeature)
-                   const processedZoneData: Partial<ProcessedZone> = {
-                       // Inherited fields from GeoJsonFeature:
-                       type: 'Feature', 
-                       id: feature.id, // Use original feature ID
-                       geometry: feature.geometry,
-                       geometry_name: feature.geometry_name, // Use original geometry_name
-                       properties: properties,
-                       // ProcessedZone specific fields:
-                       centroid: centroid,
-                   };
+              const baseZoneData: Partial<ProcessedZone> = {
+                type: 'Feature',
+                id: tempId,
+                properties: properties,
+                geometry: feature.geometry,
+                geometry_name: feature.geometry_name,
+                centroid: centroid
+              };
 
-                   if (area !== undefined) { // If area is valid
-                       processedZoneData.zoneType = 'area';
-                       processedZoneData.area = area;
-                   } else { // No valid area, treat as point
-                       processedZoneData.zoneType = 'point';
-                       // area remains undefined
-                   }
-
-                   validProcessedZones.push(processedZoneData as ProcessedZone);
-               }
-           }
+              if (area !== undefined) {
+                initialAreaZones.push({...baseZoneData, zoneType: 'area', area: area} as ProcessedZone);
+              } else {
+                initialPointZones.push({...baseZoneData, zoneType: 'point'} as ProcessedZone);
+              }
+            }
+          }
         }
-        if (isMounted) setProcessedZones(validProcessedZones);
-        console.log(`[Init] Processed ${validProcessedZones.length} valid green/orange zones.`);
+
+        console.log(`[Init] Initial processing: ${initialAreaZones.length} area zones, ${initialPointZones.length} point zones.`);
+
+        // 2. Merge Nearby Areas (separately for GROEN and ORANJE)
+        const mergeAreas = (areas: ProcessedZone[], codeToMerge: 'GROEN' | 'ORANJE'): ProcessedZone[] => {
+          const areasToMerge = areas.filter(z => z.properties.CODE === codeToMerge);
+          console.log(`[Merge] Starting merge for ${codeToMerge} areas. Count: ${areasToMerge.length}`);
+          
+          if (areasToMerge.length < 2) {
+            return areasToMerge; // Not enough to merge
+          }
+
+          const mergedResult: ProcessedZone[] = [];
+          const processedIndices = new Set<number>();
+
+          // For each unprocessed area
+          for (let i = 0; i < areasToMerge.length; i++) {
+            if (processedIndices.has(i)) continue; // Skip if already processed
+
+            // Start a new group with this area
+            const currentAreaIndices = [i];
+            let currentMergedArea = {...areasToMerge[i]};
+            let currentMergedGeometry = currentMergedArea.geometry;
+            
+            // Mark as processed
+            processedIndices.add(i);
+
+            // Look for nearby areas to merge
+            for (let j = i + 1; j < areasToMerge.length; j++) {
+              if (processedIndices.has(j)) continue; // Skip if already processed
+
+              try {
+                // Create feature objects with explicit type assertions
+                const geometry1 = {
+                  type: currentMergedGeometry.type === 'Polygon' ? 'Polygon' as const : 'MultiPolygon' as const,
+                  coordinates: currentMergedGeometry.coordinates
+                };
+                
+                const geometry2 = {
+                  type: areasToMerge[j].geometry.type === 'Polygon' ? 'Polygon' as const : 'MultiPolygon' as const,
+                  coordinates: areasToMerge[j].geometry.coordinates
+                };
+                
+                // Wrap in features
+                const feature1 = turf.feature(geometry1);
+                const feature2 = turf.feature(geometry2);
+
+                // Create buffers around the features
+                const buffer1 = turf.buffer(feature1, MERGE_DISTANCE_METERS / 2000); // meters to km
+                const buffer2 = turf.buffer(feature2, MERGE_DISTANCE_METERS / 2000); // meters to km
+
+                // Check for proximity
+                if (buffer1 && buffer2 && turf.booleanIntersects(buffer1, buffer2)) {
+                  // Areas are close enough to merge
+                  currentAreaIndices.push(j);
+                  processedIndices.add(j);
+                  
+                  // Sum the areas
+                  currentMergedArea.area = (currentMergedArea.area || 0) + (areasToMerge[j].area || 0);
+                  
+                  // For now, skip the union and just keep the original geometry
+                  // Union is causing type issues and needs more complex handling
+                }
+              } catch (error) {
+                console.warn("Error processing geometries:", error);
+                // Skip this comparison
+              }
+            }
+            
+            // After checking all other areas against the current one
+            if (currentAreaIndices.length > 1) {
+              // This area was merged with at least one other area
+              console.log(`[Merge] Merged ${currentAreaIndices.length} areas of type ${codeToMerge}`);
+              
+              // Calculate centroid for the merged geometry
+              const centroid = getCentroid(currentMergedGeometry);
+              if (centroid) {
+                // Create a new ProcessedZone for the merged area
+                mergedResult.push({
+                  ...currentMergedArea,
+                  id: `${MERGED_ZONE_ID_PREFIX}${codeToMerge}_${i}`,
+                  geometry: currentMergedGeometry,
+                  centroid: centroid
+                });
+              } else {
+                // Fallback: just use the centroid of the first area
+                mergedResult.push({
+                  ...currentMergedArea,
+                  id: `${MERGED_ZONE_ID_PREFIX}${codeToMerge}_${i}`
+                });
+              }
+            } else {
+              // This area wasn't merged with any other, add it as is
+              mergedResult.push(currentMergedArea);
+            }
+          }
+
+          return mergedResult;
+        };
+
+        // Merge areas by type
+        const mergedGreenAreas = mergeAreas([...initialAreaZones], 'GROEN');
+        const mergedOrangeAreas = mergeAreas([...initialAreaZones], 'ORANJE');
+        
+        // Combine the results
+        const allProcessedZones = [
+          ...mergedGreenAreas,
+          ...mergedOrangeAreas,
+          ...initialPointZones
+        ];
+        
+        if (isMounted) {
+          setProcessedZones(allProcessedZones);
+          console.log(`[Init] Final zones count: ${allProcessedZones.length}`);
+        }
 
         // Initial Location Fetch
-        await refreshUserLocation(true); 
+        await refreshUserLocation(true);
 
       } catch (e) {
         console.error("Failed to initialize app:", e);
         if (isMounted) {
-            if (e instanceof Error) {
-                setError(e.message);
-            } else {
-                setError("An unknown error occurred during initialization");
-            }
+          setError(e instanceof Error ? e.message : "Unknown error occurred");
         }
       } finally {
-        // Stop loading indicator once everything (location attempt + data load) is done
         if (isMounted) setLoading(false);
       }
     };
 
     initializeApp();
-
-    return () => {
-        isMounted = false;
-    };
-  }, []); // Run once on mount
+    return () => { isMounted = false; };
+  }, []);
 
   // Effect to calculate nearest zones
   useEffect(() => {
@@ -275,18 +384,48 @@ export default function HomeScreen() {
      return zoneStyles.DEFAULT; // Fallback
   };
 
-  // formatCoordinates
+  /**
+   * Formats geometry coordinates for map display.
+   * More robust handling of Polygon and MultiPolygon types.
+   */
   const formatCoordinates = (geometry: Geometry): { latitude: number; longitude: number }[] => {
-    if (!geometry || !geometry.coordinates) return [];
+    if (!geometry?.coordinates) return [];
+    const coords: any = geometry.coordinates;
 
     if (geometry.type === 'Polygon') {
-      return geometry.coordinates[0].map((coord: number[]) => ({ latitude: coord[1], longitude: coord[0] }));
+      // Handle Polygon - use the outer ring (first array of coordinates)
+      // Check if coords[0] exists and has elements
+      if (Array.isArray(coords[0])) {
+        return coords[0]
+          .map((coord: number[]) => {
+            if (Array.isArray(coord) && coord.length >= 2) {
+              return { latitude: coord[1], longitude: coord[0] };
+            }
+            return null;
+          })
+          .filter((coord): coord is { latitude: number; longitude: number } => coord !== null); // Type guard
+      }
     } else if (geometry.type === 'MultiPolygon') {
-      console.warn('MultiPolygon encountered, rendering only the first polygon outer ring for native.');
-      if (geometry.coordinates[0] && geometry.coordinates[0][0]) {
-        return geometry.coordinates[0][0].map((coord: number[]) => ({ latitude: coord[1], longitude: coord[0] }));
-      } 
+      // Handle MultiPolygon - flatten all polygon outer rings into one array
+      const flattenedCoords: { latitude: number; longitude: number }[] = [];
+      
+      // Iterate through all polygons in the MultiPolygon
+      if (Array.isArray(coords)) {
+        coords.forEach((polygon: any) => {
+          // Get the outer ring of each polygon (first array of coordinates)
+          if (Array.isArray(polygon) && Array.isArray(polygon[0])) {
+            polygon[0].forEach((coord: number[]) => {
+              if (Array.isArray(coord) && coord.length >= 2) {
+                flattenedCoords.push({ latitude: coord[1], longitude: coord[0] });
+              }
+            });
+          }
+        });
+      }
+      
+      return flattenedCoords;
     }
+    
     return [];
   };
 
