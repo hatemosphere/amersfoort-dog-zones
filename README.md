@@ -27,7 +27,7 @@ These instructions will get you a copy of the project up and running on your loc
 
 1.  **Clone the repository:**
     ```bash
-    git clone <your-repository-url>
+    git clone https://github.com/hatemosphere/amersfoort-dog-zones
     cd amersfoort-dog-zones 
     ```
 2.  **Install dependencies:**
