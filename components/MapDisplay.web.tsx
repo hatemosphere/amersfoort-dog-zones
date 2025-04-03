@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useMemo, memo } from 'react';
+import React, { useEffect, useState, useRef, useMemo, memo, useCallback } from 'react';
 import { APIProvider, Map, AdvancedMarker, Pin, InfoWindow, useMap } from '@vis.gl/react-google-maps';
 import { GeoJsonData, GeoJsonFeature, Geometry, ZoneStyles, ZoneStyle, ProcessedZone } from '../types';
 import { Feature, Point, Polygon, MultiPolygon, Position } from 'geojson';
@@ -51,6 +51,53 @@ interface MapDisplayProps {
     }; 
 }
 
+// Separate marker component to reduce rerenders
+const PointMarker = memo(({ 
+    point, 
+    isSelected, 
+    getFeatureStyle, 
+    onZoneSelect 
+}: { 
+    point: ProcessedZone, 
+    isSelected: boolean, 
+    getFeatureStyle: (feature: ProcessedZone, isSelected: boolean) => any,
+    onZoneSelect: (zone: ProcessedZone) => void 
+}) => {
+    const style = getFeatureStyle(point, isSelected);
+    if (!point.centroid) return null;
+    const props = point.properties as any;
+    const title = `Zone ${props?.OBJECTID ?? point.id}`;
+
+    // Define styles for the marker
+    const markerStyle: React.CSSProperties = useMemo(() => ({
+        width: isSelected ? '16px' : '12px',
+        height: isSelected ? '16px' : '12px',
+        backgroundColor: style.fillColor,
+        borderRadius: '50%',
+        border: isSelected ? '2px solid #0000FF' : '1px solid #333',
+        cursor: 'pointer',
+        transition: 'all 0.1s ease-in-out',
+    }), [isSelected, style.fillColor]);
+
+    // Memoize the click handler
+    const handleClick = useCallback(() => {
+        onZoneSelect(point);
+    }, [onZoneSelect, point]);
+
+    return (
+        <AdvancedMarker
+            key={point.id}
+            position={point.centroid}
+            title={title}
+            clickable={true}
+            onClick={handleClick}
+            zIndex={isSelected ? 10 : 5}
+        >
+            <div style={markerStyle}></div>
+        </AdvancedMarker>
+    );
+});
+
 // Internal component to handle map interactions after API is loaded
 const WebMap = memo(({ 
     userLocation, 
@@ -61,13 +108,14 @@ const WebMap = memo(({
     getFeatureStyle 
 }: Omit<MapDisplayProps, 'apiKey'>) => {
     const map = useMap();
-    const [drawnPolygons, setDrawnPolygons] = useState<google.maps.Polygon[]>([]);
+    // Replace state with ref to avoid re-renders
+    const drawnPolygonsRef = useRef<google.maps.Polygon[]>([]);
     const initialCenterSet = useRef(false);
     // Ref to store polygon click listener handles
     const polygonListenersRef = useRef<google.maps.MapsEventListener[]>([]); 
 
-    // Function to convert style for Google Maps Polygon
-    const getWebPolygonStyleOptions = (feature: ProcessedZone, isSelected: boolean): google.maps.PolygonOptions => {
+    // Function to convert style for Google Maps Polygon - memoize to prevent re-renders
+    const getWebPolygonStyleOptions = useCallback((feature: ProcessedZone, isSelected: boolean): google.maps.PolygonOptions => {
         const baseStyle = getFeatureStyle(feature, isSelected);
         const fillColorData = rgbaToHex(baseStyle.fillColor);
         const strokeColorData = rgbaToHex(isSelected ? '#0000FF' : baseStyle.strokeColor); // Blue outline if selected
@@ -81,50 +129,62 @@ const WebMap = memo(({
             zIndex: isSelected ? 10 : (baseStyle.zIndex ?? 1), 
             clickable: true,
         };
-    };
+    }, [getFeatureStyle]);
+    
+    // Memoize zone click handler
+    const handleZoneClick = useCallback((feature: ProcessedZone) => {
+        console.log(`[WebMap Click] Polygon ${feature.id} clicked.`);
+        onZoneSelect(feature);
+    }, [onZoneSelect]);
     
     // --- Effects --- //
     
     // Effect to center map based on centerTargetCoords prop
     useEffect(() => {
-        if (centerTargetCoords && map) {
-            console.log("[Web Map] Panning to target coords:", centerTargetCoords);
-            map.panTo(centerTargetCoords);
-            map.setZoom(17); // Zoom in when centering on a specific zone
-        }
+        if (!map || !centerTargetCoords) return;
+        
+        console.log("[Web Map] Panning to target coords:", centerTargetCoords);
+        map.panTo(centerTargetCoords);
+        map.setZoom(17); // Zoom in when centering on a specific zone
     }, [centerTargetCoords, map]); // Re-run when coords or map instance changes
+    
+    // Effect for initial centering on user location
+    useEffect(() => {
+        if (!map || !userLocation || initialCenterSet.current) return;
+        
+        console.log("[Web Map] Panning to initial user location.");
+        map.panTo({ lat: userLocation.lat, lng: userLocation.lng });
+        map.setZoom(14); // Initial zoom level
+        initialCenterSet.current = true;
+    }, [map, userLocation]); // Only depends on map and userLocation for initial centering
 
-    // Effect for initial centering and drawing polygons/markers
+    // Memoize the processed zones to prevent unnecessary rerenders
+    const memoizedZones = useMemo(() => processedZones, [processedZones]);
+    const memoizedSelectedId = useMemo(() => selectedZoneId, [selectedZoneId]);
+
+    // Effect for drawing polygons/markers - with cleanup that doesn't trigger rerenders
     useEffect(() => {
         if (!map) return;
-
-        // Center map initially on user location if available and not already centered
-        if (userLocation && !initialCenterSet.current) {
-            console.log("[Web Map] Panning to initial user location.");
-            map.panTo({ lat: userLocation.lat, lng: userLocation.lng });
-            map.setZoom(14); // Initial zoom level
-            initialCenterSet.current = true;
-        }
-
-        // --- Polygon Drawing --- // 
         
+        // Always redraw when selection changes or zones update
         // 1. Clean up previous polygons AND listeners first
-        console.log(`[Web Map Effect] Cleaning up ${polygonListenersRef.current.length} listeners and ${drawnPolygons.length} polygons.`);
+        console.log(`[Web Map Effect] Cleaning up ${polygonListenersRef.current.length} listeners and ${drawnPolygonsRef.current.length} polygons.`);
         polygonListenersRef.current.forEach(listener => listener.remove());
         polygonListenersRef.current = []; // Clear the listeners array
-        drawnPolygons.forEach(p => p.setMap(null));
+        drawnPolygonsRef.current.forEach(p => p.setMap(null));
+        drawnPolygonsRef.current = []; // Clear the polygons array
         
         // 2. Prepare new polygons and listeners
         const newPolygons: google.maps.Polygon[] = [];
         const newListeners: google.maps.MapsEventListener[] = [];
 
         // Draw polygons for 'area' type zones
-        processedZones.forEach((feature) => {
+        memoizedZones.forEach((feature) => {
             if (feature.zoneType !== 'area' || !feature.geometry || (feature.geometry.type !== 'Polygon' && feature.geometry.type !== 'MultiPolygon')) {
                 return; 
             }
 
-            const isSelected = feature.id === selectedZoneId;
+            const isSelected = feature.id === memoizedSelectedId;
             const styleOptions = getWebPolygonStyleOptions(feature, isSelected);
             
             const paths = feature.geometry.type === 'Polygon'
@@ -138,35 +198,33 @@ const WebMap = memo(({
 
                 // Add listener and store its handle
                 const listener = google.maps.event.addListener(polygon, 'click', () => {
-                    console.log(`[WebMap Click] Polygon ${feature.id} clicked.`); // Keep click log
-                    onZoneSelect(feature);
+                    handleZoneClick(feature);
                 });
                 newListeners.push(listener); // Add to temporary array
                 newPolygons.push(polygon); // Add polygon to temporary array
             });
         });
         
-        // 3. Update state and refs
+        // 3. Update refs (not state)
         console.log(`[Web Map Effect] Setting ${newListeners.length} listeners and ${newPolygons.length} polygons.`);
-        setDrawnPolygons(newPolygons);
+        drawnPolygonsRef.current = newPolygons;
         polygonListenersRef.current = newListeners; // Update the ref with new listeners
 
         // --- Cleanup Function for this Effect --- //
-        // This runs when dependencies change OR component unmounts
         return () => {
-            console.log(`[Web Map Effect Cleanup] Removing ${polygonListenersRef.current.length} listeners and ${newPolygons.length} polygons.`);
+            console.log(`[Web Map Effect Cleanup] Removing ${polygonListenersRef.current.length} listeners and ${drawnPolygonsRef.current.length} polygons.`);
             // Remove listeners associated with the polygons being replaced/unmounted
             polygonListenersRef.current.forEach(listener => listener.remove()); 
-            polygonListenersRef.current = []; // Ensure ref is cleared on unmount/dep change
             // Remove polygons from the map
-            newPolygons.forEach(p => p.setMap(null));
+            drawnPolygonsRef.current.forEach(p => p.setMap(null));
+            // Don't reset the refs here - let the next effect run handle it
         };
-    }, [map, processedZones, selectedZoneId, getFeatureStyle, onZoneSelect, userLocation]); 
+    }, [map, memoizedZones, memoizedSelectedId, getWebPolygonStyleOptions, handleZoneClick]);
 
     // Calculate points separately for Marker rendering
     const pointsToRender = useMemo(() => {
-        return processedZones.filter(zone => zone.zoneType === 'point' && zone.centroid);
-    }, [processedZones]);
+        return memoizedZones.filter(zone => zone.zoneType === 'point' && zone.centroid);
+    }, [memoizedZones]);
 
     // --- Render --- //
     return (
@@ -192,37 +250,15 @@ const WebMap = memo(({
             )}
 
             {/* Zone Point Markers */}
-             {pointsToRender.map(point => {
-                const isSelected = point.id === selectedZoneId;
-                const style = getFeatureStyle(point, isSelected);
-                if (!point.centroid) return null; 
-                const props = point.properties as any; // Cast for OBJECTID
-                const title = `Zone ${props?.OBJECTID ?? point.id}`; 
-
-                // Define base and selected styles for the marker div
-                const markerStyle: React.CSSProperties = {
-                    width: isSelected ? '16px' : '12px',
-                    height: isSelected ? '16px' : '12px',
-                    backgroundColor: style.fillColor, 
-                    borderRadius: '50%',
-                    border: isSelected ? '2px solid #0000FF' : '1px solid #333', // Blue border if selected
-                    cursor: 'pointer',
-                    transition: 'all 0.1s ease-in-out', 
-                };
-
-                return (
-                    <AdvancedMarker
-                        key={point.id}
-                        position={point.centroid}
-                        title={title} 
-                        clickable={true}
-                        onClick={() => onZoneSelect(point)}
-                        zIndex={isSelected ? 10 : 5} 
-                    >
-                       <div style={markerStyle}></div>
-                    </AdvancedMarker>
-                );
-            })}
+            {pointsToRender.map(point => (
+                <PointMarker
+                    key={point.id}
+                    point={point}
+                    isSelected={point.id === memoizedSelectedId}
+                    getFeatureStyle={getFeatureStyle}
+                    onZoneSelect={onZoneSelect}
+                />
+            ))}
         </>
     );
 });
@@ -262,33 +298,52 @@ interface CircleComponentProps {
 const CircleComponent: React.FC<CircleComponentProps> = ({ center, radius, ...options }) => {
     const map = useMap();
     const circleRef = useRef<google.maps.Circle | null>(null);
-
+    const optionsRef = useRef(options);
+    
+    // Update options ref when props change (without triggering rerenders)
+    useEffect(() => {
+        optionsRef.current = options;
+    }, [options]);
+    
+    // Only recreate circle when critical dependencies change
     useEffect(() => {
         if (!map) return;
 
-        if (!circleRef.current) {
-            circleRef.current = new google.maps.Circle({
-                map,
-                center,
-                radius,
-                ...options,
-            });
-        } else {
-            // Update existing circle
-            circleRef.current.setCenter(center);
-            circleRef.current.setRadius(radius);
-            circleRef.current.setOptions(options);
+        // Cleanup existing circle
+        if (circleRef.current) {
+            circleRef.current.setMap(null);
+            circleRef.current = null;
         }
+        
+        // Create new circle
+        circleRef.current = new google.maps.Circle({
+            map,
+            center,
+            radius,
+            ...optionsRef.current
+        });
 
-        // Cleanup
+        // Cleanup on unmount
         return () => {
             if (circleRef.current) {
-                // console.log("[Web Map] Cleaning up circle");
                 circleRef.current.setMap(null);
-                circleRef.current = null; // Important to allow recreation if map instance changes
+                circleRef.current = null;
             }
         };
-    }, [map, center, radius, options]);
+    }, [map, center, radius]); // Only depend on the critical props
+    
+    // Update circle properties when they change
+    useEffect(() => {
+        if (!circleRef.current) return;
+        
+        circleRef.current.setOptions(optionsRef.current);
+    }, [
+        options.strokeColor, 
+        options.strokeOpacity, 
+        options.strokeWeight, 
+        options.fillColor, 
+        options.fillOpacity
+    ]);
 
     return null; // Circle is drawn directly on the map, no React element needed
 };

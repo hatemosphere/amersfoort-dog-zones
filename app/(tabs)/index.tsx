@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { StyleSheet, View, ActivityIndicator, Text, Alert, Linking, TouchableOpacity, Button, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
@@ -89,6 +89,30 @@ export default function HomeScreen() {
   const [nearestZones, setNearestZones] = useState<ProcessedZone[]>([]);
   const [selectedZone, setSelectedZone] = useState<ProcessedZone | null>(null);
   const [centerTargetCoords, setCenterTargetCoords] = useState<{ lat: number, lng: number } | null>(null);
+
+  // Cache for zone distances to avoid redundant calculations
+  const [distanceCache, setDistanceCache] = useState<Map<string, number>>(new Map());
+  
+  // Function to get or calculate distance - use cached value if available
+  const getOrCalculateDistance = useCallback((zoneId: string, lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const cacheKey = `${zoneId}_${lat1.toFixed(6)}_${lon1.toFixed(6)}`;
+    
+    if (distanceCache.has(cacheKey)) {
+      return distanceCache.get(cacheKey)!;
+    }
+    
+    // Calculate new distance
+    const distance = getDistance(lat1, lon1, lat2, lon2);
+    
+    // Update cache
+    setDistanceCache(prevCache => {
+      const newCache = new Map(prevCache);
+      newCache.set(cacheKey, distance);
+      return newCache;
+    });
+    
+    return distance;
+  }, [distanceCache]);
 
   // --- Memo Hooks ---
   const amersfoortRegion = useMemo(() => ({
@@ -326,38 +350,60 @@ export default function HomeScreen() {
     return () => { isMounted = false; };
   }, []);
 
-  // Effect to calculate nearest zones
+  // Effect to calculate ONLY nearest zones when user location changes
   useEffect(() => {
-      if (userLocation && processedZones.length > 0) {
-           console.log("[Nearest] Calculating distances...");
-           const zonesWithDistance = processedZones.map(zone => ({
-               ...zone,
-               distance: getDistance(
-                   userLocation.coords.latitude, 
-                   userLocation.coords.longitude,
-                   zone.centroid.lat, 
-                   zone.centroid.lng
-               )
-           }));
-           zonesWithDistance.sort((a, b) => a.distance! - b.distance!); // Added non-null assertion
-           setNearestZones(zonesWithDistance.slice(0, MAX_NEAREST));
-      }
-  }, [userLocation, processedZones]); 
+    if (!userLocation || processedZones.length === 0) return;
+    
+    console.log("[Nearest] Calculating distances for nearest zones only...");
+    
+    // First pass: calculate approximate distances for all zones to find nearest candidates
+    const candidatesWithDistance = processedZones.map(zone => ({
+      ...zone,
+      approxDistance: getOrCalculateDistance(
+        zone.id,
+        userLocation.coords.latitude,
+        userLocation.coords.longitude,
+        zone.centroid.lat,
+        zone.centroid.lng
+      )
+    }));
+    
+    // Sort by approximate distance
+    candidatesWithDistance.sort((a, b) => a.approxDistance! - b.approxDistance!);
+    
+    // Take top candidates and create proper zone objects with distance
+    const nearestCandidates = candidatesWithDistance.slice(0, MAX_NEAREST).map(zone => ({
+      ...zone,
+      distance: zone.approxDistance
+    }));
+    
+    setNearestZones(nearestCandidates);
+  }, [userLocation, distanceCache, getOrCalculateDistance, processedZones]); // Include dependencies used inside
 
-  // Effect to update selected zone distance
+  // Effect to update selected zone distance ONLY when necessary
   useEffect(() => {
-      if (selectedZone && userLocation) {
-          console.log("[Selected] Updating distance for selected zone...");
-          const distance = getDistance(
-              userLocation.coords.latitude,
-              userLocation.coords.longitude,
-              selectedZone.centroid.lat,
-              selectedZone.centroid.lng
-          );
-          // Ensure selectedZone is updated correctly
-          setSelectedZone(prevZone => prevZone ? ({ ...prevZone, distance: distance }) : null);
+    if (!selectedZone || !userLocation) return;
+    
+    // If selected zone is already in nearest zones, it already has a distance
+    const isInNearest = nearestZones.some(zone => zone.id === selectedZone.id);
+    
+    // Only recalculate if not in nearest (lazy calculation)
+    if (!isInNearest || selectedZone.distance === undefined) {
+      console.log("[Selected] Lazy distance calculation for selected zone...");
+      const distance = getOrCalculateDistance(
+        selectedZone.id,
+        userLocation.coords.latitude,
+        userLocation.coords.longitude,
+        selectedZone.centroid.lat,
+        selectedZone.centroid.lng
+      );
+      
+      // Update only if distance changed or wasn't defined
+      if (selectedZone.distance === undefined || selectedZone.distance !== distance) {
+        setSelectedZone(prevZone => prevZone ? ({ ...prevZone, distance }) : null);
       }
-  }, [userLocation, selectedZone]);
+    }
+  }, [selectedZone, userLocation, nearestZones, getOrCalculateDistance]); // Include all dependencies
 
   // --- Early Returns (AFTER all hooks) ---
   if (loading) {
@@ -431,28 +477,31 @@ export default function HomeScreen() {
 
   // --- Log selection & Set Center Target ---
   const handleZoneSelection = (zone: ProcessedZone | null, fromList: boolean = false) => {
-      console.log(`[Selection] Zone selected via ${zone ? (fromList? 'list' : 'map') : 'cleared'}. ID: ${zone?.id}`);
-      
-      // Calculate distance if we have both user location and zone
-      if (zone && userLocation) {
-          const distance = getDistance(
-              userLocation.coords.latitude,
-              userLocation.coords.longitude,
-              zone.centroid.lat,
-              zone.centroid.lng
-          );
-          zone.distance = distance;
+    console.log(`[Selection] Zone selected via ${zone ? (fromList ? 'list' : 'map') : 'cleared'}. ID: ${zone?.id}`);
+    
+    // If zone is selected and user location exists, ensure it has a distance
+    if (zone && userLocation) {
+      // Check if distance is already calculated
+      if (zone.distance === undefined) {
+        // Lazy calculate distance only when needed
+        const distance = getOrCalculateDistance(
+          zone.id,
+          userLocation.coords.latitude,
+          userLocation.coords.longitude,
+          zone.centroid.lat,
+          zone.centroid.lng
+        );
+        zone = { ...zone, distance };
       }
-      
-      setSelectedZone(zone);
-      // Set center target ONLY if selected from the list
-      if (zone && fromList && zone.centroid) {
-           console.log("[Center] Setting center target from list selection:", zone.centroid);
-           setCenterTargetCoords(zone.centroid); 
-      } else if (!zone) {
-           // Optionally clear target when selection is cleared? Or keep map position?
-           // setCenterTargetCoords(null);
-      }
+    }
+    
+    setSelectedZone(zone);
+    
+    // Set center target ONLY if selected from the list
+    if (zone && fromList && zone.centroid) {
+      console.log("[Center] Setting center target from list selection:", zone.centroid);
+      setCenterTargetCoords(zone.centroid);
+    }
   };
 
   // --- Navigation Handler (keep simplified onPress for now) ---
