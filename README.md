@@ -2,9 +2,6 @@
 
 An Expo React Native application displaying designated dog off-leash zones in Amersfoort, Netherlands.
 
-![App Screenshot Placeholder](https://via.placeholder.com/400x300.png?text=App+Screenshot) 
-*(Replace with an actual screenshot)*
-
 ## Features
 
 *   Displays dog off-leash zones (Green and Orange areas/points) on an interactive map.
@@ -110,8 +107,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-*(Specify your license here, e.g., MIT License)*
+MIT License
 
 ---
 
-*This README was generated with assistance from an AI Pair Programmer.*
